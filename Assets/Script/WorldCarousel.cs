@@ -5,220 +5,150 @@ using UnityEngine.UI;
 using UnityEngine.EventSystems;
 
 /// <summary>
-/// Drag-to-snap carousel with Hill Climb Racing-style momentum:
-/// - Drag/flick the panel, it keeps gliding after release (inertia)
-/// - Friction slows it down, then it eases into a snap on the nearest card
-/// - Centered card scales up, side cards scale/fade down (focus effect)
-/// Works with Unity UI (RectTransform + EventSystem), not world-space sprites.
+/// Attach this to the Panel GameObject (the one that gets dragged). It must also have
+/// a Graphic component (e.g. Image, can be transparent) with "Raycast Target" ON so it
+/// receives drag events - Unity's drag interfaces need something raycastable to hit.
+///
+/// Behaviour (Hill Climb Racing style):
+///  - Drag the panel -> it follows your finger/mouse 1:1
+///  - Release -> it keeps moving with momentum (inertia), gradually slowing down (Damping)
+///  - Once it's slow enough, it automatically snaps so the nearest button lands on 'center'
+///  - Tapping any button also snaps it directly to center (original behaviour kept)
 /// </summary>
 public class WorldCarousel : MonoBehaviour, IBeginDragHandler, IDragHandler, IEndDragHandler
 {
-    // ---- Original public fields (kept as-is) ----
-    public RectTransform panel;   // the Scroll Panel holding all the cards
+    [Header("Original References")]
+    public RectTransform panel;       // The Scroll Panel (this object, or the one being moved)
     public Button[] bttn;
-    public RectTransform center;  // where a card should land when "focused"
+    public RectTransform center;      // Fixed point cards should snap toward
 
-    [Header("Snap settings")]
-    public float snapSpeed = 10f;
-    public float snapThreshold = 0.5f;
+    [Header("Inertia / Snap Settings")]
+    public float damping = 4f;        // higher = stops sooner after release
+    public float snapSpeed = 10f;     // higher = snaps into place faster
+    public float snapVelocityThreshold = 40f; // below this speed (px/sec), start snapping instead of coasting
 
-    [Header("Momentum / Inertia (Hill Climb Racing feel)")]
-    [Tooltip("How quickly the flick speed decays per second. Higher = stops sooner.")]
-    public float damping = 4f;
-    [Tooltip("Below this speed (px/sec), inertia ends and snapping begins.")]
-    public float inertiaStopThreshold = 40f;
+    [Header("Optional Focus Scaling")]
+    public bool enableFocusScaling = false;
+    public float focusedScale = 1.00f;
+    public float unfocusedScale = 0.02f;
 
-    [Header("Focus scale/fade effect")]
-    public float focusedScale = 1.15f;
-    public float unfocusedScale = 0.85f;
-    [Tooltip("Optional: fades side cards out. Needs a CanvasGroup on each card.")]
-    public bool fadeUnfocusedCards = true;
-    public float minAlpha = 0.5f;
-
-    // ---- Private state ----
+    // Distance tracking (kept from your original script)
     private float[] distance;
     private int minButtonNum;
 
-    private bool isDragging = false;
-    private bool isInertia = false;
-    private bool isSnapping = false;
-
-    private float velocityX = 0f;      // current momentum, px/sec
+    // Drag / inertia state
+    private bool dragging = false;
+    private float velocityX = 0f;      // current horizontal speed, px/sec
     private Vector2 lastPointerPos;
-
-    private CanvasGroup[] cardGroups;
+    private bool snapping = false;
+    private Vector2 targetPosition;
 
     void Start()
     {
-        int bttnLength = bttn.Length;
-        distance = new float[bttnLength];
-        cardGroups = new CanvasGroup[bttnLength];
-
-        for (int i = 0; i < bttnLength; i++)
-        {
-            int index = i;
-            bttn[i].onClick.AddListener(() => OnWorldButtonClicked(index));
-
-            // Cache/create a CanvasGroup per card so we can fade unfocused ones
-            if (fadeUnfocusedCards)
-            {
-                var cg = bttn[i].GetComponent<CanvasGroup>();
-                if (cg == null) cg = bttn[i].gameObject.AddComponent<CanvasGroup>();
-                cardGroups[i] = cg;
-            }
-        }
+        distance = new float[bttn.Length];
     }
 
     void Update()
     {
         UpdateDistances();
-        minButtonNum = GetNearestButtonIndex();
 
-        if (isInertia)
+        if (dragging)
+            return; // panel position is driven directly by OnDrag while dragging
+
+        if (Mathf.Abs(velocityX) > snapVelocityThreshold)
         {
-            ApplyInertia();
+            // --- Inertia phase: coast and decay, same idea as SimulateInertia() ---
+            panel.anchoredPosition += new Vector2(velocityX * Time.deltaTime, 0f);
+            velocityX -= Mathf.Sign(velocityX) * damping * 100f * Time.deltaTime;
+
+            // Once it decays enough, hand off to the snap phase
+            if (Mathf.Abs(velocityX) <= snapVelocityThreshold)
+            {
+                velocityX = 0f;
+                SnapToButton(minButtonNum);
+            }
         }
-        else if (isSnapping)
+        else if (snapping)
         {
-            ApplySnap();
+            // --- Snap phase: smoothly glide the closest card onto 'center' ---
+            panel.anchoredPosition = Vector2.Lerp(panel.anchoredPosition, targetPosition, Time.deltaTime * snapSpeed);
+
+            if (Vector2.Distance(panel.anchoredPosition, targetPosition) < 0.5f)
+            {
+                panel.anchoredPosition = targetPosition;
+                snapping = false;
+            }
         }
 
-        UpdateCardVisuals();
+        if (enableFocusScaling)
+            UpdateFocusScaling();
     }
 
+    // ----- Distance tracking (from your original script) -----
     private void UpdateDistances()
     {
+        float smallestDistance = float.MaxValue;
         for (int i = 0; i < bttn.Length; i++)
         {
             distance[i] = Mathf.Abs(center.position.x - bttn[i].transform.position.x);
-        }
-    }
-
-    private int GetNearestButtonIndex()
-    {
-        int nearest = 0;
-        float smallest = float.MaxValue;
-        for (int i = 0; i < distance.Length; i++)
-        {
-            if (distance[i] < smallest)
+            if (distance[i] < smallestDistance)
             {
-                smallest = distance[i];
-                nearest = i;
+                smallestDistance = distance[i];
+                minButtonNum = i;
             }
         }
-        return nearest;
     }
 
-    // ---------------- Drag handlers (replaces Input.GetMouseButton from the found script) ----------------
-
+    // ----- Drag handlers (replace ScrollRect's own dragging) -----
     public void OnBeginDrag(PointerEventData eventData)
     {
-        isDragging = true;
-        isInertia = false;
-        isSnapping = false;
+        dragging = true;
+        snapping = false;
         velocityX = 0f;
         lastPointerPos = eventData.position;
     }
 
     public void OnDrag(PointerEventData eventData)
     {
-        // Move the panel 1:1 with the finger/mouse
-        panel.anchoredPosition += new Vector2(eventData.delta.x, 0);
+        Vector2 delta = eventData.position - lastPointerPos;
+        panel.anchoredPosition += new Vector2(delta.x, 0f);
 
-        // Track speed for momentum once released (px/sec)
-        float dt = Mathf.Max(Time.deltaTime, 0.0001f);
-        velocityX = eventData.delta.x / dt;
+        // Track instantaneous speed so we can carry it into inertia on release
+        velocityX = delta.x / Mathf.Max(Time.deltaTime, 0.0001f);
+        lastPointerPos = eventData.position;
     }
 
     public void OnEndDrag(PointerEventData eventData)
     {
-        isDragging = false;
-
-        if (Mathf.Abs(velocityX) > inertiaStopThreshold)
-        {
-            isInertia = true;   // let it glide, like flicking a Hill Climb Racing menu
-        }
-        else
-        {
-            isInertia = false;
-            isSnapping = true;  // barely moved - snap immediately
-        }
+        dragging = false;
+        // velocityX already holds the last frame's drag speed - inertia picks up in Update()
     }
 
-    // ---------------- Inertia (equivalent to SimulateInertia() in the found script) ----------------
-
-    private void ApplyInertia()
+    // ----- Snap logic (kept from your original script) -----
+    private void SnapToButton(int index)
     {
-        // Friction: reduce speed magnitude over time, keep direction
-        float frictionThisFrame = damping * 100f * Time.deltaTime; // *100 so 'damping' values feel similar in scale to Inspector-friendly numbers
-        if (velocityX > 0)
-            velocityX = Mathf.Max(0, velocityX - frictionThisFrame);
-        else
-            velocityX = Mathf.Min(0, velocityX + frictionThisFrame);
-
-        panel.anchoredPosition += new Vector2(velocityX * Time.deltaTime, 0);
-
-        if (Mathf.Abs(velocityX) <= inertiaStopThreshold)
-        {
-            isInertia = false;
-            isSnapping = true; // hand off to snapping, same as found script's SnapInitialize()
-        }
+        float offsetX = center.position.x - bttn[index].transform.position.x;
+        targetPosition = panel.anchoredPosition + new Vector2(offsetX, 0f);
+        snapping = true;
     }
 
-    // ---------------- Snap (equivalent to Snap()/SnapInitialize() in the found script) ----------------
-
-    private void ApplySnap()
+    /// <summary>
+    /// Wire this to each button's OnClick to let tapping a card snap it to center directly.
+    /// </summary>
+    public void OnButtonTapped(int index)
     {
-        RectTransform target = bttn[minButtonNum].GetComponent<RectTransform>();
-        float offset = center.position.x - target.position.x;
-        Vector2 targetPos = panel.anchoredPosition + new Vector2(offset, 0);
-
-        panel.anchoredPosition = Vector2.Lerp(panel.anchoredPosition, targetPos, Time.deltaTime * snapSpeed);
-
-        if (Vector2.Distance(panel.anchoredPosition, targetPos) < snapThreshold)
-        {
-            panel.anchoredPosition = targetPos;
-            isSnapping = false;
-        }
+        velocityX = 0f;
+        SnapToButton(index);
     }
 
-    // ---------------- Focus scale/fade (equivalent to UpdateSlideScale() in the found script) ----------------
-
-    private void UpdateCardVisuals()
+    // ----- Optional: scale the centered card up, others down (Disney-carousel look) -----
+    private void UpdateFocusScaling()
     {
-        float halfViewport = ((RectTransform)panel.parent).rect.width * 0.5f;
-        if (halfViewport <= 0f) halfViewport = 500f; // safety fallback
-
         for (int i = 0; i < bttn.Length; i++)
         {
-            float t = Mathf.Clamp01(distance[i] / halfViewport);
+            float t = Mathf.Clamp01(distance[i] / (Screen.width * 0.5f));
             float scale = Mathf.Lerp(focusedScale, unfocusedScale, t);
             bttn[i].transform.localScale = Vector3.one * scale;
-
-            if (fadeUnfocusedCards && cardGroups[i] != null)
-            {
-                cardGroups[i].alpha = Mathf.Lerp(1f, minAlpha, t);
-            }
-        }
-    }
-
-    // ---------------- Button tap (kept from your original script) ----------------
-
-    private void OnWorldButtonClicked(int index)
-    {
-        if (isDragging) return; // ignore taps mid-drag
-
-        if (index == minButtonNum)
-        {
-            Debug.Log($"Load world at index {index}: {bttn[index].name}");
-            // TODO: e.g. LevelManager.LoadWorld(index);
-        }
-        else
-        {
-            isInertia = false;
-            isSnapping = false;
-            minButtonNum = index; // force target, ApplySnap() will pick it up next frame
-            isSnapping = true;
         }
     }
 }

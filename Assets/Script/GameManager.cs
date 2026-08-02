@@ -1,6 +1,7 @@
 using System.Collections;
 using UnityEngine;
 using UnityEngine.UI;
+using UnityEngine.SceneManagement;
 using TMPro;
 
 /// <summary>
@@ -28,20 +29,20 @@ public class GameManager : MonoBehaviour
 
     [Header("UI - Header")]
     [SerializeField] private TMP_Text levelLabel;          // "Tahap 1"
-    [SerializeField] private TMP_Text timerLabel;           // "00:00"
-    [SerializeField] private TMP_Text scoreLabel;            // "0"
+    [SerializeField] private TMP_Text timerLabel;           // "02:30"
+    [SerializeField] private TMP_Text scoreLabel;            // "120"
     [SerializeField] private Image[] heartIcons;             // 3 heart images
     [SerializeField] private Sprite heartFullSprite;          // red filled heart
     [SerializeField] private Sprite heartEmptySprite;         // gray/outline heart
 
     [Header("UI - Question Card")]
-    [SerializeField] private TMP_Text progressLabel;         // "1 / 10"
+    [SerializeField] private TMP_Text progressLabel;         // "7 / 10"
     [SerializeField] private TMP_Text questionLabel;          // "456 + 378 = ?"
     [SerializeField] private Button[] answerButtons;           // 4 buttons: A B C D
     [SerializeField] private TMP_Text[] answerLabels;           // text inside each button
 
-    private QuestionGenerator _generator;
-    private MathQuestion _currentQuestion;
+    private UnitQuestionGenerator _generator;
+    private UnitQuestion _currentQuestion;
     private int _questionIndex;      // 0-based, shown as +1
     private int _score;
     private int _correctCount;
@@ -49,14 +50,30 @@ public class GameManager : MonoBehaviour
     private float _timeRemaining;
     private Coroutine _timerRoutine;
     private bool _roundEnded;
+    private bool _isPaused;
+
+    /// <summary>
+    /// Simple per-scene singleton (NOT persistent/DontDestroyOnLoad) so an additively-loaded
+    /// scene (like a shared PauseOverlay) can find "the current level's GameManager" at runtime,
+    /// since cross-scene Inspector references aren't possible.
+    /// </summary>
+    public static GameManager Instance { get; private set; }
 
     private void Awake()
     {
-        _generator = new QuestionGenerator();
+        Instance = this;
+        _generator = new UnitQuestionGenerator();
     }
 
     private void Start()
     {
+        // If the player tapped a specific level button on the level-select screen,
+        // it stored that number here - override the Inspector default with it.
+        if (PlayerPrefs.HasKey("SelectedLevel"))
+        {
+            level = PlayerPrefs.GetInt("SelectedLevel");
+        }
+
         _score = 0;
         _correctCount = 0;
         _heartsRemaining = startingHearts;
@@ -98,8 +115,8 @@ public class GameManager : MonoBehaviour
 
         for (int i = 0; i < answerButtons.Length; i++)
         {
-            int optionValue = _currentQuestion.Options[i];
-            answerLabels[i].text = optionValue.ToString();
+            string optionValue = _currentQuestion.Options[i];
+            answerLabels[i].text = optionValue;
 
             Button btn = answerButtons[i];
             btn.onClick.RemoveAllListeners();
@@ -108,9 +125,9 @@ public class GameManager : MonoBehaviour
         }
     }
 
-    private void OnAnswerSelected(int selectedValue)
+    private void OnAnswerSelected(string selectedValue)
     {
-        if (_roundEnded) return;
+        if (_roundEnded || _isPaused) return;
 
         foreach (var btn in answerButtons) btn.interactable = false; // lock while resolving
 
@@ -157,6 +174,13 @@ public class GameManager : MonoBehaviour
     {
         while (_timeRemaining > 0f && !_roundEnded)
         {
+            if (_isPaused)
+            {
+                // Skip the countdown entirely this frame - timer freezes exactly where it was
+                yield return null;
+                continue;
+            }
+
             _timeRemaining -= Time.deltaTime;
             int mins = Mathf.FloorToInt(Mathf.Max(0, _timeRemaining) / 60f);
             int secs = Mathf.FloorToInt(Mathf.Max(0, _timeRemaining) % 60f);
@@ -194,6 +218,58 @@ public class GameManager : MonoBehaviour
 
     private void UpdateScore() => scoreLabel.text = _score.ToString();
 
+    // ---------- Public controls: Home / Replay / Pause / Resume ----------
+
+    /// <summary>
+    /// Freezes the level: timer stops counting down, answer buttons stop responding.
+    /// Call this from your Pause button's OnClick.
+    /// </summary>
+    public void PauseGame()
+    {
+        if (_roundEnded || _isPaused) return;
+
+        _isPaused = true;
+        foreach (var btn in answerButtons) btn.interactable = false;
+    }
+
+    /// <summary>
+    /// Un-freezes the level: timer resumes from exactly where it left off,
+    /// answer buttons become clickable again. Call this from your Resume button.
+    /// </summary>
+    public void ResumeGame()
+    {
+        if (!_isPaused) return;
+
+        _isPaused = false;
+        if (!_roundEnded)
+        {
+            foreach (var btn in answerButtons) btn.interactable = true;
+        }
+    }
+
+    /// <summary>
+    /// Restarts the CURRENT level from question 1 - simplest and safest way is to
+    /// just reload the active scene, since every field (_score, _heartsRemaining,
+    /// _questionIndex, _timeRemaining, etc.) gets freshly reset in Start().
+    /// Call this from your Replay button.
+    /// </summary>
+    public void RestartLevel()
+    {
+        Time.timeScale = 1f; // safety net in case anything elsewhere paused via timeScale
+        SceneManager.LoadScene(SceneManager.GetActiveScene().buildIndex);
+    }
+
+    /// <summary>
+    /// Leaves the level and returns to the main menu scene.
+    /// Call this from your Home button. Make sure "MainMenu" (or whatever you pass in)
+    /// is added to File > Build Settings > Scenes In Build, and the name matches exactly.
+    /// </summary>
+    public void GoToMainMenu(string mainMenuSceneName = "MainMenu")
+    {
+        Time.timeScale = 1f;
+        SceneManager.LoadScene(mainMenuSceneName);
+    }
+
     /// <summary>
     /// Ends the round - either because all 10 questions were answered in time,
     /// hearts ran out, or the level-wide timer hit zero.
@@ -213,6 +289,14 @@ public class GameManager : MonoBehaviour
         Debug.Log($"Round ended. Correct: {_correctCount}/{questionsPerLevel}, " +
                   $"Answered: {_questionIndex}/{questionsPerLevel}, " +
                   $"FinishedInTime: {finishedInTime}, Score: {_score}, Stars: {starRating}/3");
+
+        // Mark this level as "completed" (unlocks the gold sprite on the level-select
+        // screen) as long as the player earned at least 1 star - tweak this condition
+        // if you want a stricter/looser passing requirement.
+        if (starRating > 0)
+        {
+            LevelSelectManager.MarkLevelCompleted(operationType.ToString(), level);
+        }
 
         if (_heartsRemaining <= 0)
         {

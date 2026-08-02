@@ -6,11 +6,11 @@ EditorBuildSettings:
   serializedVersion: 2
   m_Scenes:
   - enabled: 1
-    path: Assets/Scene/MainMenu.unity
-    guid: 4a68d750069eb06428b25560e185ab1b
-  - enabled: 1
     path: Assets/Scene/Intro.unity
     guid: bd083ea1472e3104693c576c72579156
+  - enabled: 1
+    path: Assets/Scene/MainMenu.unity
+    guid: 4a68d750069eb06428b25560e185ab1b
   - enabled: 1
     path: Assets/Scene/MathWorld.unity
     guid: f211d39af66be4747aaa2f7b29d20cad
@@ -41,6 +41,12 @@ EditorBuildSettings:
   - enabled: 1
     path: Assets/Scene/DivideQuestions.unity
     guid: 2d2a41a35c37eff4fa8e5218cec523ba
+  - enabled: 1
+    path: Assets/Scene/Achievement.unity
+    guid: d22d1c1ff0e6f6942ad1243ae8996fb0
+  - enabled: 1
+    path: Assets/Scene/PausePage.unity
+    guid: c7c79422712cc594fa48531169d1dcd9
   m_configObjects:
     com.unity.adaptiveperformance.google.android.provider_settings: {fileID: 11400000, guid: 3e58af0f784350342af81c25109c7c84, type: 2}
     com.unity.adaptiveperformance.loader_settings: {fileID: 11400000, guid: e38b2b52a929b8e468b79a0228a1a480, type: 2}
